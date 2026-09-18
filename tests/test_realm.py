@@ -357,6 +357,21 @@ rm() {
         self.shell('main list')
         self.assertIn('customised', shortcut.read_text())
 
+    def test_uninstall_without_realm_lists_only_scripts(self):
+        manager = self.root/'manager.sh'
+        manager.write_text('#!/bin/bash\n# Realm Manager —\n')
+        result = self.shell('uninstall_realm', extra='confirm() { return 0; }')
+        self.assertIn('没有安装 Realm', result.stdout)
+        self.assertNotIn(str(self.base/'realm')+'\n', result.stdout)
+        self.assertNotIn('修改前备份', result.stdout)
+        self.assertIn('已删除：管理脚本。', result.stdout)
+        self.assertFalse(manager.exists())
+
+    def test_uninstall_with_nothing_to_remove_changes_nothing(self):
+        result = self.shell('uninstall_realm', expected=1, extra='confirm() { return 0; }')
+        self.assertIn('没有需要删除', result.stdout)
+        self.assertFalse(list(self.backups.iterdir()))
+
 
 if __name__ == '__main__':
     unittest.main()

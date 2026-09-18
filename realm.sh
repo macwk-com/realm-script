@@ -306,7 +306,7 @@ begin_transaction() {
     trap transaction_end EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    printf '修改前备份：%s\n' "$tx_backup"
+    [[ ${tx_quiet:-0} == 1 ]] || printf '修改前备份：%s\n' "$tx_backup"
 }
 commit_transaction() {
     tx_committed=1
@@ -479,10 +479,15 @@ restart_service() {
     systemctl restart realm.service && wait_service || return 1
     printf 'Realm 已重启，所有端口都在正常监听。\n'
 }
+# Lists and removes only what actually exists; returns 2 when cancelled or there is nothing to remove.
 uninstall_realm() (
-    local candidate cleanup_failed=0
-    local targets=("$BASE_DIR/realm" "$UNIT_PATH" "$CONFIG_PATH")
-    local scripts=()
+    local candidate cleanup_failed=0 installed=0 active=0 backups packages
+    local targets=() scripts=() removed=()
+    [[ ! -e $BASE_DIR/realm ]] || { targets+=("$BASE_DIR/realm"); removed+=('Realm 程序'); }
+    [[ ! -e $UNIT_PATH ]] || { targets+=("$UNIT_PATH"); removed+=('systemd 服务'); }
+    [[ ! -e $CONFIG_PATH ]] || { targets+=("$CONFIG_PATH"); removed+=('转发配置'); }
+    (( ${#targets[@]} == 0 )) || installed=1
+    systemctl is-active --quiet realm.service && active=1
     for candidate in "$SELF_PATH" "$SHORTCUT_PATH" "$LEGACY_SCRIPT" "$BASE_DIR/realm.sh"; do
         [[ -f $candidate && ! -L $candidate ]] || continue
         if grep -Fq '# Realm Manager —' "$candidate" ||
@@ -494,14 +499,29 @@ uninstall_realm() (
         fi
     done
     targets+=(${scripts[@]+"${scripts[@]}"})
-    printf '\n完整卸载将停止转发，并删除：\n'
-    printf '  %s\n' "${targets[@]}"
-    printf '  %s 中本脚本创建的所有 snapshot-* 备份\n' "$BACKUP_ROOT"
-    printf '  %s 中的 Realm 安装包；空目录也会移除。\n' "$BASE_DIR"
-    printf '不会清理系统共享日志、依赖包或 UFW 规则；其他程序的文件会保留。\n'
-    confirm '确认完整卸载（配置和备份不会保留）？' || return 2
+    (( ${#scripts[@]} == 0 )) || removed+=('管理脚本')
+    backups=$(find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'snapshot-*' 2>/dev/null | wc -l)
+    packages=$(find "$BASE_DIR" -maxdepth 1 -type f -name 'realm*.tar.gz' 2>/dev/null | wc -l)
+    (( backups == 0 )) || removed+=("$backups 份操作备份")
+    (( packages == 0 )) || removed+=("$packages 个安装包")
+    if (( ${#removed[@]} == 0 && ! active )); then
+        printf '\n这台服务器上没有安装 Realm，也没有需要删除的管理脚本或备份。\n'
+        return 2
+    fi
+    printf '\n'
+    (( installed || active )) || printf '这台服务器上没有安装 Realm（没有程序、服务和转发配置）。\n'
+    printf '完整卸载会删除：\n'
+    for candidate in ${targets[@]+"${targets[@]}"}; do printf '  %s\n' "$candidate"; done
+    (( backups == 0 )) || printf '  %s 里的 %s 份操作备份\n' "$BACKUP_ROOT" "$backups"
+    (( packages == 0 )) || printf '  %s 里的 %s 个 Realm 安装包\n' "$BASE_DIR" "$packages"
+    (( ! active )) || printf 'Realm 正在运行，会先停止，所有转发立即中断。\n'
+    (( ${#scripts[@]} == 0 )) || printf '删除管理脚本后，要重新执行一键安装命令才能再用。\n'
+    printf '不会动系统日志、依赖包、防火墙规则和其他程序的文件；只移除空目录。\n'
+    if [[ -e $CONFIG_PATH ]]; then confirm '确认完整卸载？转发配置和备份都不会保留' || return 2
+    else confirm '确认删除？' || return 2; fi
     init_env || return 1
-    begin_transaction "${targets[@]}" || return 1
+    local tx_quiet=1
+    begin_transaction ${targets[@]+"${targets[@]}"} || return 1
     local enabled=0
     systemctl is-enabled --quiet realm.service && enabled=1
     service_touched=1
@@ -510,8 +530,8 @@ uninstall_realm() (
         systemctl stop realm.service || return 1
     fi
     if systemctl is-active --quiet realm.service; then error '服务仍在运行，已停止卸载。'; return 1; fi
-    if (( enabled )); then systemctl disable realm.service || return 1; fi
-    rm -f -- "${targets[@]}" || return 1
+    if (( enabled )); then systemctl disable --quiet realm.service || return 1; fi
+    (( ${#targets[@]} == 0 )) || rm -f -- "${targets[@]}" || return 1
     systemctl daemon-reload || return 1
     # Recovery remains possible until service removal and script deletion succeed.
     # Complete uninstall explicitly discards the transaction snapshot afterwards.
@@ -539,7 +559,9 @@ PY
         error '程序、服务、配置和脚本已卸载，但部分备份/安装包清理失败，请按上面的路径检查。'
         return 1
     fi
-    printf '完整卸载完成：程序、服务、配置、管理脚本和备份已删除。\n'
+    local summary='' item
+    for item in ${removed[@]+"${removed[@]}"}; do summary+=${summary:+、}$item; done
+    printf '完整卸载完成，已删除：%s。\n' "${summary:-Realm 服务}"
 )
 # raw.githubusercontent.com caches main for 5 minutes; resolve the latest commit (cached 60s) instead.
 latest_commit() {
