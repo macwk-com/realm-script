@@ -617,6 +617,12 @@ human_uptime() {
     else printf '%s 天' $(( s / 86400 )); fi
 }
 # Service summary plus every rule with the state of its listening port.
+# The first run from a downloaded file installs the realmctl command; an existing one is left alone.
+ensure_shortcut() {
+    [[ $SELF_PATH != "$SHORTCUT_PATH" && -f $SELF_PATH && ! -e $SHORTCUT_PATH && ! -L $SHORTCUT_PATH ]] || return 1
+    grep -Fq '# Realm Manager —' "$SELF_PATH" || return 1
+    atomic_install "$SELF_PATH" "$SHORTCUT_PATH" 755
+}
 show_overview() {
     set_colors
     local state color note version active=0 pending=0 started rows count broken=0
@@ -740,15 +746,86 @@ menu_delete() {
     ask_apply delete
     run_action mutate_config delete "$value" "$apply" || error '删除没有完成，配置没有改动。'
 }
+# Menu layout follows vps-firewall: aligned two columns, blank line between rows, one column when narrow.
+menu_pair() {
+    text_width "$1"
+    local padding=$((28 - REPLY))
+    (( padding >= 0 )) || padding=0
+    printf '  %s%*s    %s\n' "$1" "$padding" '' "$2"
+}
+menu_item() { printf '  %s%2s.%s %s' "$cyan" "$1" "$reset" "$2"; }
+menu_rule() {
+    local line
+    printf -v line '%*s' "$menu_span" ''
+    printf '  %s%s%s\n' "$blue" "${line// /─}" "$reset"
+}
+menu_draw() {
+    local columns=$1 version=$2 status=$3 count=$4 protocols=$5 title=$6 detail=$7 note=${8:-}
+    local cyan='' blue='' reset='' bold='' dim=''
+    if [[ -t 1 && ${TERM:-dumb} != dumb && -z ${NO_COLOR:-} ]]; then
+        cyan=$'\033[36m'; blue=$'\033[34m'; reset=$'\033[0m'
+        bold=$'\033[1m'; dim=$'\033[90m'
+    fi
+    local menu_span=60 wide=1 i padding
+    if (( columns < 64 )); then
+        wide=0; menu_span=$((columns - 4))
+        (( menu_span >= 24 )) || menu_span=24
+    fi
+    printf '\n'
+    if (( columns >= 44 )); then
+        printf '%s' "$cyan"
+        cat <<'LOGO'
+   ____  _____    _    _     __  __
+  |  _ \| ____|  / \  | |   |  \/  |
+  | |_) |  _|   / _ \ | |   | |\/| |
+  |  _ <| |___ / ___ \| |___| |  | |
+  |_| \_\_____/_/   \_\_____|_|  |_|
+LOGO
+        printf '%s' "$reset"
+    fi
+    printf '\n  %sRealm 中转管理  ·  TCP / UDP%s\n' "$bold" "$reset"
+    printf '  %s端口转发的部署、规则与服务管理%s\n\n' "$dim" "$reset"
+    menu_rule
+    if (( wide )); then
+        menu_pair "程序      $version" "服务      $status"
+        menu_pair "规则      $count" "协议      $protocols"
+    else
+        printf '  程序      %s\n  服务      %s\n  规则      %s\n  协议      %s\n' "$version" "$status" "$count" "$protocols"
+    fi
+    menu_rule
+    printf '\n'
+    local labels=('部署 Realm' '查看转发规则' '添加转发规则' '删除转发规则' '启动并开启自启' '停止并关闭自启' '重启服务'
+                  '更新 Realm' '卸载 Realm' '更新管理脚本' '查看服务日志' '安装 realmctl 快捷命令' '查看备份')
+    if (( wide )); then
+        menu_pair '转发与服务' '更新与维护'
+        printf '\n'
+        for ((i=0;i<7;i++)); do
+            menu_item "$((i+1))" "${labels[i]}"
+            if (( i < 6 )); then
+                text_width "${labels[i]}"; padding=$((28 - 4 - REPLY))
+                # The first column already supplied the row indentation.
+                printf '%*s    %s%2s.%s %s' "$padding" '' "$cyan" "$((i+8))" "$reset" "${labels[i+7]}"
+            fi
+            printf '\n\n'
+        done
+    else
+        printf '  %s转发与服务%s\n\n' "$dim" "$reset"
+        for ((i=0;i<13;i++)); do
+            (( i != 7 )) || printf '\n  %s更新与维护%s\n\n' "$dim" "$reset"
+            menu_item "$((i+1))" "${labels[i]}"; printf '\n\n'
+        done
+    fi
+    menu_rule
+    menu_item 0 '退出'; printf '\n'; menu_rule
+    [[ -z $note ]] || printf '\n  %s已安装快捷命令 realmctl%s\n  以后直接输入 realmctl 就能打开这个菜单。\n' "$cyan" "$reset"
+    [[ -z $title ]] || printf '\n  %s%s%s\n  %s\n' "$cyan" "$title" "$reset" "$detail"
+    printf '\n'
+}
 menu() {
-    local cyan='' purple='' reset='' choice answer rc
-    if [[ -t 1 && -z ${NO_COLOR:-} ]]; then cyan=$'\033[36m';purple=$'\033[35m';reset=$'\033[0m';fi
+    local choice answer rc columns
     while true; do
         [[ ${TERM:-dumb} == dumb ]] || printf '\033[2J\033[H'
-        printf '%s\n   ____  _____    _    _     __  __\n  |  _ \\| ____|  / \\  | |   |  \\/  |\n  | |_) |  _|   / _ \\ | |   | |\\/| |\n  |  _ <| |___ / ___ \\| |___| |  | |\n  |_| \\_\\_____/_/   \\_\\_____|_|  |_|%s\n' "$cyan" "$reset"
-        printf '\n  Realm 中转管理  ·  TCP / UDP\n'
-        printf '%s  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$purple" "$reset"
-        local version='未安装' status='未部署' count hint=''
+        local version='未安装' status='未部署' count protocols='—' title='' detail=''
         if [[ -x $BASE_DIR/realm ]]; then
             version=$("$BASE_DIR/realm" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
             version=${version:-程序异常}
@@ -762,24 +839,26 @@ menu() {
             esac
         fi
         count=$(config_tool count 2>/dev/null) || count='配置错误'
-        printf '  程序 ▸ %s    服务 ▸ %s    规则 ▸ %s\n' "$version" "$status" "$count"
-        printf '%s  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$purple" "$reset"
-        if [[ $status == 未部署 ]]; then hint='下一步：选择 1 部署 Realm'
-        elif [[ $count == 配置错误 ]]; then hint='配置文件有错误，选择 2 查看详情'
-        elif [[ $count == 0 ]]; then hint='下一步：选择 3 添加转发规则'
-        elif [[ $status == 启动失败 ]]; then hint='服务启动失败，选择 11 查看日志'
-        elif [[ $status != 运行中 ]]; then hint='规则已保存但服务没在运行，选择 5 启动'
-        elif config_pending; then hint='配置有改动还没生效，选择 7 重启'
+        protocols=$(config_tool protocols 2>/dev/null) || protocols='—'
+        if [[ $status == 未部署 ]]; then title='尚未部署'; detail='新服务器请先选择 1。'
+        elif [[ $count == 配置错误 ]]; then title='配置文件有错误'; detail='选择 2 查看详情。'
+        elif [[ $count == 0 ]]; then title='还没有转发规则'; detail='选择 3 添加第一条。'
+        elif [[ $status == 启动失败 ]]; then title='服务启动失败'; detail='选择 11 查看日志。'
+        elif [[ $status != 运行中 ]]; then title='服务没在运行'; detail='规则已保存，选择 5 启动。'
+        elif config_pending; then title='配置有改动还没生效'; detail='选择 7 重启。'
         fi
-        [[ -z $hint ]] || printf '  %s%s%s\n' "$cyan" "$hint" "$reset"
-        printf '\n  1. 部署 Realm           7. 重启服务\n  2. 查看转发规则         8. 更新 Realm\n  3. 添加转发规则         9. 卸载 Realm\n  4. 删除转发规则        10. 更新管理脚本\n  5. 启动并开启自启      11. 查看服务日志\n  6. 停止并关闭自启      12. 安装 realmctl 快捷命令\n                        13. 查看备份\n\n  0. 退出\n\n'
+        [[ $count == 配置错误 ]] || count="$count 条"
+        columns=$(tput cols 2>/dev/null) || columns=${COLUMNS:-80}
+        [[ $columns =~ ^[0-9]+$ ]] || columns=80
+        menu_draw "$columns" "$version" "$status" "$count" "$protocols" "$title" "$detail" "${shortcut_installed:-}"
+        shortcut_installed=''
         while true; do
-            ask choice '请选择 [0-13]: ' || return 0
+            ask choice '  请选择 [0-13]: ' || return 0
             case "$choice" in
                 0|88|q|Q) return 0 ;;
                 [1-9]|1[0-3]) break ;;
                 '') ;;
-                *) printf '没有这个选项，请输入 0 到 13。\n' ;;
+                *) printf '  没有这个选项，请输入 0 到 13。\n' ;;
             esac
         done
         case "$choice" in
@@ -814,6 +893,10 @@ menu() {
 main() {
     if [[ ${1:-} == -h || ${1:-} == --help ]]; then usage;return 0;fi
     check_platform && check_dependencies || return 1
+    if ensure_shortcut; then
+        shortcut_installed=1
+        [[ ${1:-menu} == menu ]] || printf '已安装快捷命令 realmctl，以后直接输入 realmctl 即可。\n'
+    fi
     case ${1:-menu} in
         menu) [[ -t 0 ]] || { error '菜单需要交互终端。';return 1; };menu ;;
         list) config_tool list ;;

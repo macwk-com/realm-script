@@ -347,6 +347,16 @@ rm() {
         self.assertIn('0.0.0.0:12000', out)
         self.assertIn('未运行', out)
 
+    def test_first_run_installs_shortcut_once(self):
+        manager = self.root/'manager.sh'
+        manager.write_text(SCRIPT.read_text())
+        self.shell('main list')
+        shortcut = self.root/'realmctl'
+        self.assertEqual(shortcut.read_text(), manager.read_text())
+        shortcut.write_text('#!/bin/bash\n# Realm Manager —\n# customised\n')
+        self.shell('main list')
+        self.assertIn('customised', shortcut.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

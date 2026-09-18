@@ -1,26 +1,52 @@
 # Realm 中转管理
 
-用于 Linux + systemd 的彩色终端菜单，管理 Realm TCP/UDP 转发、安装更新和服务状态。保留原项目的程序位置 `/root/realm/realm` 和配置位置 `/root/.realm/config.toml`，适合已有安装直接使用。
+用 [Realm](https://github.com/zhboner/realm) 做 TCP/UDP 端口转发的终端菜单：部署和更新 Realm、增删转发规则、管理 systemd 服务。主要面向 Debian 13，Ubuntu、Rocky/Alma 也能用。沿用原项目的程序位置 `/root/realm/realm` 和配置位置 `/root/.realm/config.toml`，已有安装可以直接接管。
 
-## 使用
+## 一键安装
 
-以 root 运行本地脚本：
+在 VPS 上以 root 执行；需要已安装 `curl` 和 CA 证书：
 
 ```bash
-bash realm.sh
+curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o /usr/local/bin/realmctl && chmod 755 /usr/local/bin/realmctl && realmctl
 ```
 
-菜单包括部署、查看规则、添加规则、删除规则、启动/停止/重启服务、更新 Realm、卸载、更新管理脚本、查看日志和备份。菜单顶部会按当前状态提示下一步，比如还没部署、还没有规则、服务没运行，或配置改了还没生效。
+如果提示找不到 curl，先执行：
 
-菜单 2（或 `bash realm.sh status`）是一页总览：服务是否运行、版本、开机自启、已运行多久、转发协议，以及每条规则的实际状态——监听中、端口被哪个程序占用、改了配置等重启生效。进程在运行不代表每条转发都生效，这一栏能直接看出哪条有问题。
+```bash
+apt update && apt install -y curl ca-certificates
+```
 
-添加规则时每一步当场检查：本机端口被其他程序占用、和已有规则冲突、目标地址写错，都会提示并重新输入；直接回车返回菜单。删除时可以一次选多条（如 `1,3` 或 `1-3`），确认前会列出要删的规则。
+这条命令把管理脚本保存为 `/usr/local/bin/realmctl` 并打开菜单。保存脚本本身不会安装 Realm，也不会改动转发规则。新服务器在菜单里先选 **1 部署 Realm**，再选 **3 添加转发规则**。
 
-菜单 12 可安装快捷命令，以后运行：
+以后直接输入：
 
 ```bash
 realmctl
 ```
+
+普通用户先下载再用 sudo 安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o /tmp/realmctl && sudo install -m 755 /tmp/realmctl /usr/local/bin/realmctl && sudo realmctl
+```
+
+也可以先下载、检查再执行（第一次运行会自动装上 `realmctl` 命令）：
+
+```bash
+curl -fSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o realm.sh
+less realm.sh
+bash realm.sh
+```
+
+下面命令行示例中的 `bash realm.sh`，安装后也可以直接写成 `realmctl`。
+
+## 使用
+
+菜单包括部署、查看规则、添加规则、删除规则、启动/停止/重启服务、更新 Realm、卸载、更新管理脚本、查看日志和备份。菜单底部会按当前状态提示下一步，比如还没部署、还没有规则、服务没运行，或配置改了还没生效。
+
+菜单 2（或 `bash realm.sh status`）是一页总览：服务是否运行、版本、开机自启、已运行多久、转发协议，以及每条规则的实际状态——监听中、端口被哪个程序占用、改了配置等重启生效。进程在运行不代表每条转发都生效，这一栏能直接看出哪条有问题。
+
+添加规则时每一步当场检查：本机端口被其他程序占用、和已有规则冲突、目标地址写错，都会提示并重新输入；直接回车返回菜单。删除时可以一次选多条（如 `1,3` 或 `1-3`），确认前会列出要删的规则。
 
 初次使用会检查依赖，只安装缺少的 `curl`、`ca-certificates`、`python3-tomlkit`、`util-linux`。主要面向 Debian 13，Ubuntu 和 Rocky/Alma 也能用（dnf 系统会先启用 EPEL 以安装 `python3-tomlkit`）；缺少依赖时停止，不会错误报告安装成功。macOS、没有运行 systemd 的容器或非 root 环境不会执行部署。
 
@@ -58,6 +84,12 @@ bash realm.sh status
 
 本工具不自动修改 UFW；新增监听端口后，需要在防火墙及服务商安全组中放行。菜单添加默认监听 `0.0.0.0`，可通过命令行指定具体 IP 或 IPv6。
 
+## 更新
+
+- 菜单 **10 更新管理脚本**：下载 `main` 分支的最新提交，推送后一分钟内就能更新到；`realmctl` 等已安装的副本一起更新，更新完自动打开新版本。
+- 菜单 **8 更新 Realm**：从 Realm 官方发布下载最新版本，现有配置和规则保留。
+- 也可以重新执行上面的一键安装命令。它走 GitHub 下载地址，刚推送的更新可能要等 5 分钟。
+
 ## 配置与安装保护
 
 - 使用 TOML Kit 解析、展示和修改规则，保留无关配置及注释。日志、DNS 表不会被误删，传输参数不会覆盖列表显示的地址。
@@ -66,7 +98,7 @@ bash realm.sh status
 - 从 Realm 官方 GitHub release 的资产列表选择安装包，保留 HTTPS 证书校验；发布提供 SHA256 时验证摘要。
 - 下载到临时目录，仅提取安装包中的普通 `realm` 文件，验证新程序能运行且版本匹配后原子替换。
 - 更新前正在运行的服务会重启并检查状态；失败时恢复旧文件并尝试恢复服务。原来未运行的服务不会因更新而自动启动。
-- 自更新使用当前脚本的绝对路径，下载和语法检查成功后再替换，不受工作目录切换影响。下载前先查 `main` 的最新提交再按提交下载，推送后一分钟内就能更新到，不受 GitHub 下载地址 5 分钟缓存影响。`realmctl` 等已安装的副本会一起更新。
+- 自更新使用当前脚本的绝对路径，下载和语法检查成功后再替换，不受工作目录切换影响。
 - 菜单 9 为完整卸载，确认后停止并禁用服务，删除 Realm 程序、服务文件、当前配置、脚本生成的全部备份及安装包，并删除当前管理脚本和已识别的 `/usr/local/bin/realmctl`、`/root/realm.sh`、`/root/realm/realm.sh`。成功后退出菜单；转发规则不会保留。
 - 只移除空目录，保留目录内其他文件；不删除系统共享日志、依赖包或 UFW 放行规则。服务停止或文件删除失败时会尝试恢复，卸载成功后不保留恢复备份。
 
@@ -89,14 +121,3 @@ python3 -m unittest discover -s tests -v
 ```
 
 测试 Python 环境需要安装 `tomlkit`。测试覆盖注释和编号、传输参数、全局配置保留、IPv6、输入错误、命令行初始化、失败回退、发布摘要、安装包提取、旧配置保留及备份清理。
-
-## 获取脚本
-
-仓库发布当前改动后，可使用：
-
-```bash
-curl -fSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o realm.sh
-bash realm.sh
-```
-
-官方 Realm：[zhboner/realm](https://github.com/zhboner/realm)。
