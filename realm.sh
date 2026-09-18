@@ -36,6 +36,7 @@ usage() {
   bash realm.sh list                查看规则
   bash realm.sh -l IP:端口 -r 目标:端口   添加规则（仅保存）
   bash realm.sh add IP:端口 目标:端口 [--apply]
+  bash realm.sh modify 序号 IP:端口 目标:端口 [--apply]
   bash realm.sh delete 序号或范围 [--apply]
   bash realm.sh install | update | start | stop | restart | status
   bash realm.sh shortcut             安装 realmctl 快捷命令
@@ -169,13 +170,28 @@ try:
         for index in selection(args[0],len(entries)):
             print(f"  {index}. {entries[index-1]['listen']}  →  {entries[index-1]['remote']}")
     elif operation=='check-listen':
-        host,port=address(args[0],True)
+        # An optional rule number is skipped, so a rule never conflicts with itself when modified.
+        host,port=address(args[0],True); skip=int(args[1]) if len(args)>1 else 0
         for index,entry in enumerate(entries,1):
+            if index==skip: continue
             old,oldport=address(entry['listen'],True)
             if port==oldport and (host==old or host.is_unspecified or old.is_unspecified):
                 raise ValueError(f'和第 {index} 条规则的监听端口 {port} 冲突')
         print(port)
     elif operation=='check-remote': address(args[0])
+    elif operation=='set':
+        if len(args)!=3: raise ValueError('修改需要序号、监听地址和目标地址')
+        chosen=selection(args[0],len(entries))
+        if len(chosen)!=1: raise ValueError('一次只能修改一条规则')
+        index=chosen[0]; host,port=address(args[1],True); address(args[2])
+        for other,entry in enumerate(entries,1):
+            if other==index: continue
+            old,oldport=address(entry['listen'],True)
+            if port==oldport and (host==old or host.is_unspecified or old.is_unspecified):
+                raise ValueError(f'和第 {other} 条规则的监听端口 {port} 冲突')
+        # Only the two addresses change; transport options and comments stay.
+        doc['endpoints'][index-1]['listen']=args[1]; doc['endpoints'][index-1]['remote']=args[2]
+        save(doc)
     elif operation=='listens':
         # Ports Realm should bind, following the global and per-rule [network] switches.
         for entry in entries:
@@ -257,7 +273,7 @@ wait_listening() {
         port=${item%/*}; proto=${item#*/}
         owner=$(port_owner "$port" "${proto:0:1}")
         if [[ -n $owner ]]; then printf '  %s  已被 %s 占用\n' "$item" "$owner" >&2
-        else printf '  %s  没有监听，请查看日志（菜单 11）\n' "$item" >&2; fi
+        else printf '  %s  没有监听，请查看日志（菜单 10）\n' "$item" >&2; fi
     done
     return 1
 }
@@ -316,19 +332,23 @@ commit_transaction() {
 # Each operation runs in its own subshell so traps and temporary state cannot leak into the menu.
 # apply=yes restarts a running service, starts a stopped one, and stops it once no rule is left.
 mutate_config() (
-    local op=$1 value=$2 apply=$3 extra=${4:-} port owner proto
+    local op=$1 value=$2 apply=$3 extra=${4:-} extra2=${5:-} port owner proto listen=$2 remote=${4:-} skip=''
+    [[ $op != modify ]] || { listen=$extra; remote=$extra2; skip=$value; }
     init_env || return 1
-    if [[ $op == add ]]; then
-        port=$(config_tool check-listen "$value") || return 1
-        config_tool check-remote "$extra" || return 1
+    if [[ $op != delete ]]; then
+        port=$(config_tool check-listen "$listen" ${skip:+"$skip"}) || return 1
+        config_tool check-remote "$remote" || return 1
         for proto in t u; do
             owner=$(port_owner "$port" "$proto")
             [[ -z $owner || $owner == realm ]] || { error "本机端口 $port 已被 $owner 使用，请换一个端口。"; return 1; }
         done
     fi
     begin_transaction "$CONFIG_PATH" || return 1
-    if [[ $op == add ]]; then config_tool add "$value" "$extra" || return 1
-    else config_tool delete "$value" || return 1; fi
+    case $op in
+        add) config_tool add "$value" "$extra" || return 1 ;;
+        modify) config_tool set "$value" "$extra" "$extra2" || return 1 ;;
+        *) config_tool delete "$value" || return 1 ;;
+    esac
     if [[ $apply == yes ]]; then
         [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { error 'Realm 未部署，已恢复配置；可不加 --apply 仅保存。'; return 1; }
         service_touched=1
@@ -370,7 +390,13 @@ asset_name() {
         *) error '不支持当前 CPU 架构，请手动安装 Realm。'; return 1 ;;
     esac
 }
-prepare_release() {
+# Installed Realm version such as 2.9.6, or nothing.
+realm_version() {
+    [[ -x $BASE_DIR/realm ]] || return 0
+    "$BASE_DIR/realm" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1
+}
+# Latest release metadata: sets release_tag, release_url and release_digest.
+release_info() {
     local asset metadata
     asset=$(asset_name) || return 1
     fetch https://api.github.com/repos/zhboner/realm/releases/latest "$stage_dir/release.json" || return 1
@@ -386,12 +412,14 @@ print(tag);print(u);print(a.get('digest') or '-')
 PY
 ) || return 1
     release_tag=$(printf '%s\n' "$metadata" | sed -n '1p')
-    local url digest
-    url=$(printf '%s\n' "$metadata" | sed -n '2p')
-    digest=$(printf '%s\n' "$metadata" | sed -n '3p')
+    release_url=$(printf '%s\n' "$metadata" | sed -n '2p')
+    release_digest=$(printf '%s\n' "$metadata" | sed -n '3p')
+}
+# Download, verify and stage the release found by release_info.
+prepare_release() {
     printf '下载 Realm %s\n' "$release_tag"
-    fetch "$url" "$stage_dir/realm.tar.gz" || return 1
-    "$PYTHON" - "$stage_dir" "$digest" <<'PY'
+    fetch "$release_url" "$stage_dir/realm.tar.gz" || return 1
+    "$PYTHON" - "$stage_dir" "$release_digest" <<'PY'
 import sys,pathlib,tarfile,hashlib,shutil
 root=pathlib.Path(sys.argv[1]);archive=root/'realm.tar.gz';digest=sys.argv[2]
 if digest!='-':
@@ -414,10 +442,27 @@ atomic_install() {
     tmp=$(mktemp "$(dirname "$target")/.realm-install-XXXXXXXX") || return 1
     if ! install -m "$mode" "$source" "$tmp" || ! mv -f "$tmp" "$target"; then rm -f "$tmp"; return 1; fi
 }
+# deploy_realm [install|update]: install skips an existing deployment; update skips when already
+# on the latest release and asks before restarting a running service. Returns 2 when cancelled.
 deploy_realm() (
+    local mode=${1:-install} current
+    current=$(realm_version)
+    if [[ $mode == install && -n $current && -f $UNIT_PATH ]]; then
+        printf 'Realm 已经部署（版本 %s），要升级请选择菜单 9「更新 Realm」。\n' "$current"
+        return 0
+    fi
     init_env || return 1
     stage_dir=$(mktemp -d "$BASE_DIR/.download-XXXXXXXX") || return 1
     trap 'rm -rf -- "$stage_dir"' EXIT
+    release_info || return 1
+    if [[ $mode == update && $current == "${release_tag#v}" ]]; then
+        printf 'Realm 已经是最新版 %s，不需要更新。\n' "$current"
+        return 0
+    fi
+    if [[ $mode == update && -t 0 ]] && systemctl is-active --quiet realm.service; then
+        printf 'Realm %s → %s\n' "${current:-未知版本}" "${release_tag#v}"
+        confirm '更新要重启 Realm，正在转发的连接会断开一下。现在更新？' y || { printf '已取消，没有更新。\n'; return 2; }
+    fi
     prepare_release || return 1
     # Existing files are only touched after a working executable has been staged.
     begin_transaction "$BASE_DIR/realm" "$CONFIG_PATH" "$UNIT_PATH" || return 1
@@ -450,18 +495,18 @@ EOF
         systemctl restart realm.service && wait_service || return 1
         printf 'Realm %s 已安装，现有配置保留，服务已重启，所有端口都在正常监听。\n' "$release_tag"
     elif [[ $(config_tool count) == 0 ]]; then
-        printf 'Realm %s 已安装。下一步：添加转发规则（菜单 3）。\n' "$release_tag"
+        printf 'Realm %s 已安装。下一步：添加转发规则（菜单 2）。\n' "$release_tag"
     else
         printf 'Realm %s 已安装，现有规则保留。服务还没启动，可以选择菜单 5 启动。\n' "$release_tag"
     fi
     commit_transaction
 )
-update_realm() { [[ -x $BASE_DIR/realm ]] || { error '请先部署 Realm。'; return 1; }; deploy_realm; }
+update_realm() { [[ -x $BASE_DIR/realm ]] || { error '请先部署 Realm。'; return 1; }; deploy_realm update; }
 # Realm exits immediately without endpoints, so refuse to start it empty.
 require_rules() {
-    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { error 'Realm 还没部署，请先选择菜单 1。'; return 1; }
+    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { error 'Realm 还没部署，请先选择菜单 8。'; return 1; }
     config_tool validate || return 1
-    [[ $(config_tool count) != 0 ]] || { error '还没有转发规则，请先添加（菜单 3）。'; return 1; }
+    [[ $(config_tool count) != 0 ]] || { error '还没有转发规则，请先添加（菜单 2）。'; return 1; }
 }
 start_service() {
     require_rules || return 1
@@ -470,6 +515,10 @@ start_service() {
 }
 stop_service() {
     [[ -f $UNIT_PATH ]] || { error 'Realm 还没部署。'; return 1; }
+    if ! systemctl is-active --quiet realm.service && ! systemctl is-enabled --quiet realm.service; then
+        printf 'Realm 本来就没在运行，也没有设开机自启。\n'
+        return 0
+    fi
     systemctl stop realm.service && systemctl disable --quiet realm.service || return 1
     if systemctl is-active --quiet realm.service; then error '服务仍在运行。'; return 1; fi
     printf 'Realm 已停止，开机自启已禁用。\n'
@@ -652,9 +701,9 @@ show_overview() {
     rows=$(config_tool rows) || return 1
     count=0; [[ -z $rows ]] || count=$(wc -l <<< "$rows")
     if [[ ! -x $BASE_DIR/realm || ! -f $UNIT_PATH ]]; then
-        state='● 未部署'; color=$c_err; note='选择 1 部署 Realm'
+        state='● 未部署'; color=$c_err; note='选择 8 部署 Realm'
     else
-        version=$("$BASE_DIR/realm" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+        version=$(realm_version)
         case $(systemctl is-active realm.service 2>/dev/null) in
             active)
                 active=1; state='● 运行中'; color=$c_ok
@@ -663,7 +712,7 @@ show_overview() {
                 if systemctl is-enabled --quiet realm.service; then note+='开机自启'; else note+='未设开机自启'; fi
                 [[ -z $started ]] || note+=" · 已运行 $(human_uptime $(( $(date +%s) - $(date -d "$started" +%s) )))"
                 config_pending && pending=1 ;;
-            failed) state='● 启动失败'; color=$c_err; note='选择 11 查看日志' ;;
+            failed) state='● 启动失败'; color=$c_err; note='选择 10 查看日志' ;;
             *)
                 state='● 未运行'; color=$c_warn; note="${version:-版本未知}"
                 (( count == 0 )) || note+=' · 选择 5 启动' ;;
@@ -675,7 +724,7 @@ show_overview() {
 
     section "转发规则（$count 条）"
     if (( count == 0 )); then
-        printf '  %s无，选择 3 添加%s\n\n' "$c_dim" "$c_off"
+        printf '  %s无，选择 2 添加%s\n\n' "$c_dim" "$c_off"
         return 0
     fi
     printf '  %s%s%s%s状态%s\n' "$c_dim" "$(pad 序号 6)" "$(pad 本机监听 24)" "$(pad 远程目标 28)" "$c_off"
@@ -697,7 +746,7 @@ show_overview() {
     done <<< "$rows"
     (( ! pending && ! broken )) || printf '\n'
     (( ! pending )) || printf '  %s配置有改动还没生效，选择 7 重启。%s\n' "$c_warn" "$c_off"
-    (( ! broken )) || printf '  %s有端口没监听成功：被占用的请换端口，其他情况选择 11 查看日志。%s\n' "$c_err" "$c_off"
+    (( ! broken )) || printf '  %s有端口没监听成功：被占用的请换端口，其他情况选择 10 查看日志。%s\n' "$c_err" "$c_off"
     printf '\n'
 }
 run_action() (
@@ -708,15 +757,25 @@ run_action() (
 # Ask whether to apply now; sets apply to yes or no depending on the running state.
 ask_apply() {
     apply=no
-    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { printf 'Realm 还没部署，规则先保存，部署后启动即可生效（菜单 1）。\n'; return 0; }
+    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { printf 'Realm 还没部署，规则先保存，部署后启动即可生效（菜单 8）。\n'; return 0; }
     if systemctl is-active --quiet realm.service; then
         if confirm '立即重启 Realm 让改动生效？正在转发的连接会断开一下' y; then apply=yes; fi
     elif [[ $1 == add ]]; then
         if confirm 'Realm 现在没有运行，保存后启动它？' y; then apply=yes; fi
     fi
 }
+# Ask for the remote port when the answer has none (a bare IPv6 gets brackets); REPLY holds the target.
+complete_remote() {
+    local value=$1 rport
+    if [[ $value != *:* || $value == \[*\] || ( $value == *:*:* && $value != \[* ) ]]; then
+        [[ $value == *:* && $value != \[* ]] && value="[$value]"
+        ask rport '远程端口: ' && [[ -n $rport ]] || return 1
+        value="$value:$rport"
+    fi
+    REPLY=$value
+}
 menu_add() {
-    local value listen remote port rport owner proto apply msg
+    local value listen remote port owner proto apply msg
     printf '\n添加转发规则：把本机的一个端口转发到远程目标。直接回车返回菜单。\n\n'
     while true; do
         ask value '本机监听端口（如 23456）: ' && [[ -n $value ]] || return 0
@@ -733,13 +792,8 @@ menu_add() {
     done
     while true; do
         ask value '远程目标（IP 或域名:端口，如 1.2.3.4:443）: ' && [[ -n $value ]] || return 0
-        # A bare IPv6 address or a host without a port still needs the remote port.
-        if [[ $value != *:* || $value == \[*\] || ( $value == *:*:* && $value != \[* ) ]]; then
-            [[ $value == *:* && $value != \[* ]] && value="[$value]"
-            ask rport '远程端口: ' && [[ -n $rport ]] || return 0
-            value="$value:$rport"
-        fi
-        remote=$value
+        complete_remote "$value" || return 0
+        remote=$REPLY
         msg=$(config_tool check-remote "$remote" 2>&1) && break
         printf '%s\n' "${msg#配置操作失败：}"
     done
@@ -749,6 +803,52 @@ menu_add() {
         firewall_hint "$port"
     else
         error '添加没有完成，配置没有改动。'
+    fi
+}
+menu_modify() {
+    local count value index cur_listen cur_remote listen remote port owner proto apply msg
+    count=$(config_tool count) || return 0
+    (( count > 0 )) || { printf '\n还没有转发规则。\n'; return 0; }
+    printf '\n'
+    config_tool list
+    printf '\n'
+    while true; do
+        ask value '要修改哪一条？输入序号（回车返回）: ' && [[ -n $value ]] || return 0
+        [[ $value =~ ^[0-9]+$ ]] && (( 10#$value >= 1 && 10#$value <= count )) && break
+        printf '请输入 1 到 %s 之间的序号。\n' "$count"
+    done
+    index=$((10#$value))
+    IFS=$'\t' read -r _ cur_listen cur_remote _ _ <<< "$(config_tool rows | sed -n "${index}p")"
+    printf '\n第 %s 条现在是：%s  →  %s\n直接回车表示这一项不改。\n\n' "$index" "$cur_listen" "$cur_remote"
+    while true; do
+        ask value "本机监听端口 [${cur_listen##*:}]: " || return 0
+        if [[ -z $value ]]; then listen=$cur_listen
+        elif [[ $value =~ ^[0-9]+$ ]]; then listen="${cur_listen%:*}:$value"
+        else listen=$value; fi
+        port=$(config_tool check-listen "$listen" "$index" 2>&1) || { printf '%s\n' "${port#配置操作失败：}"; continue; }
+        owner=''
+        for proto in t u; do
+            owner=$(port_owner "$port" "$proto")
+            [[ -z $owner || $owner == realm ]] || break
+            owner=''
+        done
+        [[ -z $owner ]] && break
+        printf '端口 %s 已被 %s 使用，请换一个。\n' "$port" "$owner"
+    done
+    while true; do
+        ask value "远程目标 [$cur_remote]: " || return 0
+        if [[ -z $value ]]; then remote=$cur_remote
+        else complete_remote "$value" || return 0; remote=$REPLY; fi
+        msg=$(config_tool check-remote "$remote" 2>&1) && break
+        printf '%s\n' "${msg#配置操作失败：}"
+    done
+    if [[ $listen == "$cur_listen" && $remote == "$cur_remote" ]]; then printf '没有改动。\n'; return 0; fi
+    printf '\n将修改第 %s 条：\n  原来  %s  →  %s\n  改为  %s  →  %s\n' "$index" "$cur_listen" "$cur_remote" "$listen" "$remote"
+    ask_apply modify
+    if run_action mutate_config modify "$index" "$apply" "$listen" "$remote"; then
+        [[ ${listen##*:} == "${cur_listen##*:}" ]] || firewall_hint "$port"
+    else
+        error '修改没有完成，配置没有改动。'
     fi
 }
 menu_delete() {
@@ -816,14 +916,14 @@ LOGO
     fi
     menu_rule
     printf '\n'
-    local labels=('部署 Realm' '查看转发规则' '添加转发规则' '删除转发规则' '启动并开启自启' '停止并关闭自启' '重启服务'
-                  '更新 Realm' '卸载 Realm' '更新管理脚本' '查看服务日志' '安装 realmctl 快捷命令' '查看备份')
+    local labels=('查看转发规则' '添加转发规则' '修改转发规则' '删除转发规则' '启动并开启自启' '停止并关闭自启' '重启服务'
+                  '部署 Realm' '更新 Realm' '查看服务日志' '更新管理脚本' '卸载 Realm')
     if (( wide )); then
-        menu_pair '转发与服务' '更新与维护'
+        menu_pair '日常操作' '安装与维护'
         printf '\n'
         for ((i=0;i<7;i++)); do
             menu_item "$((i+1))" "${labels[i]}"
-            if (( i < 6 )); then
+            if (( i < 5 )); then
                 text_width "${labels[i]}"; padding=$((28 - 4 - REPLY))
                 # The first column already supplied the row indentation.
                 printf '%*s    %s%2s.%s %s' "$padding" '' "$cyan" "$((i+8))" "$reset" "${labels[i+7]}"
@@ -831,9 +931,9 @@ LOGO
             printf '\n\n'
         done
     else
-        printf '  %s转发与服务%s\n\n' "$dim" "$reset"
-        for ((i=0;i<13;i++)); do
-            (( i != 7 )) || printf '\n  %s更新与维护%s\n\n' "$dim" "$reset"
+        printf '  %s日常操作%s\n\n' "$dim" "$reset"
+        for ((i=0;i<12;i++)); do
+            (( i != 7 )) || printf '\n  %s安装与维护%s\n\n' "$dim" "$reset"
             menu_item "$((i+1))" "${labels[i]}"; printf '\n\n'
         done
     fi
@@ -849,7 +949,7 @@ menu() {
         [[ ${TERM:-dumb} == dumb ]] || printf '\033[2J\033[H'
         local version='未安装' status='未部署' count protocols='—' title='' detail=''
         if [[ -x $BASE_DIR/realm ]]; then
-            version=$("$BASE_DIR/realm" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            version=$(realm_version)
             version=${version:-程序异常}
         fi
         if [[ -f $UNIT_PATH ]]; then
@@ -862,10 +962,10 @@ menu() {
         fi
         count=$(config_tool count 2>/dev/null) || count='配置错误'
         protocols=$(config_tool protocols 2>/dev/null) || protocols='—'
-        if [[ $status == 未部署 ]]; then title='尚未部署'; detail='新服务器请先选择 1。'
-        elif [[ $count == 配置错误 ]]; then title='配置文件有错误'; detail='选择 2 查看详情。'
-        elif [[ $count == 0 ]]; then title='还没有转发规则'; detail='选择 3 添加第一条。'
-        elif [[ $status == 启动失败 ]]; then title='服务启动失败'; detail='选择 11 查看日志。'
+        if [[ $status == 未部署 ]]; then title='尚未部署'; detail='新服务器请先选择 8。'
+        elif [[ $count == 配置错误 ]]; then title='配置文件有错误'; detail='选择 1 查看详情。'
+        elif [[ $count == 0 ]]; then title='还没有转发规则'; detail='选择 2 添加第一条。'
+        elif [[ $status == 启动失败 ]]; then title='服务启动失败'; detail='选择 10 查看日志。'
         elif [[ $status != 运行中 ]]; then title='服务没在运行'; detail='规则已保存，选择 5 启动。'
         elif config_pending; then title='配置有改动还没生效'; detail='选择 7 重启。'
         fi
@@ -875,29 +975,29 @@ menu() {
         menu_draw "$columns" "$version" "$status" "$count" "$protocols" "$title" "$detail" "${shortcut_installed:-}"
         shortcut_installed=''
         while true; do
-            ask choice '  请选择 [0-13]: ' || return 0
+            ask choice '  请选择 [0-12]: ' || return 0
             case "$choice" in
                 0|88|q|Q) return 0 ;;
-                [1-9]|1[0-3]) break ;;
+                [1-9]|1[0-2]) break ;;
                 '') ;;
-                *) printf '  没有这个选项，请输入 0 到 13。\n' ;;
+                *) printf '  没有这个选项，请输入 0 到 12。\n' ;;
             esac
         done
         case "$choice" in
-            1) run_action deploy_realm || error '部署未完成。' ;;
-            2) show_overview || true ;;
-            3) menu_add ;;
+            1) show_overview || true ;;
+            2) menu_add ;;
+            3) menu_modify ;;
             4) menu_delete ;;
             5) run_action start_service || error '启动没有完成。' ;;
             6) run_action stop_service || error '停止操作失败。' ;;
             7) run_action restart_service || error '重启没有完成。' ;;
-            8) run_action update_realm || error '更新未完成。' ;;
+            8) run_action deploy_realm || error '部署未完成。' ;;
             9)
                 rc=0
-                run_action uninstall_realm || rc=$?
-                if (( rc == 0 )); then return 0; fi
-                if (( rc != 2 )); then error '卸载未完成，请查看上面的提示。'; fi ;;
-            10)
+                run_action update_realm || rc=$?
+                (( rc == 0 || rc == 2 )) || error '更新未完成。' ;;
+            10) journalctl -u realm.service -n 50 --no-pager || true ;;
+            11)
                 rc=0
                 run_action Update_Shell || rc=$?
                 if (( rc == 0 )); then
@@ -905,9 +1005,11 @@ menu() {
                     exec bash "$SELF_PATH"
                 fi
                 if (( rc != 2 )); then error '管理脚本更新失败。'; fi ;;
-            11) journalctl -u realm.service -n 50 --no-pager || true ;;
-            12) run_action install_shortcut || true ;;
-            13) printf '成功操作后保留最近一次备份：\n'; find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'snapshot-*' -print 2>/dev/null | grep . || printf '暂无备份。\n' ;;
+            12)
+                rc=0
+                run_action uninstall_realm || rc=$?
+                if (( rc == 0 )); then return 0; fi
+                if (( rc != 2 )); then error '卸载未完成，请查看上面的提示。'; fi ;;
         esac
         ask answer $'\n按回车返回菜单……' || return 0
     done
@@ -927,6 +1029,10 @@ main() {
             [[ $# == 3 || ( $# == 4 && $4 == --apply ) ]] || { usage;return 1; }
             local apply=no; [[ ${4:-} != --apply ]] || apply=yes
             run_action mutate_config add "$2" "$apply" "$3" ;;
+        modify)
+            [[ $# == 4 || ( $# == 5 && $5 == --apply ) ]] || { usage;return 1; }
+            local apply=no; [[ ${5:-} != --apply ]] || apply=yes
+            run_action mutate_config modify "$2" "$apply" "$3" "$4" ;;
         delete)
             [[ $# == 2 || ( $# == 3 && $3 == --apply ) ]] || { usage;return 1; }
             local apply=no; [[ ${3:-} != --apply ]] || apply=yes

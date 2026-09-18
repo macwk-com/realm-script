@@ -21,3 +21,6 @@ Icon
 __pycache__/
 
 *.pyc
+
+# 开发用测试，只留在本机
+tests/
