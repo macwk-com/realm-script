@@ -7,7 +7,7 @@
 在 VPS 上以 root 执行；需要已安装 `curl` 和 CA 证书：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o /usr/local/bin/realmctl && chmod 755 /usr/local/bin/realmctl && realmctl
+bash <(curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/install.sh)
 ```
 
 如果提示找不到 curl，先执行：
@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.s
 apt update && apt install -y curl ca-certificates
 ```
 
-这条命令把管理脚本保存为 `/usr/local/bin/realmctl` 并打开菜单。保存脚本本身不会安装 Realm，也不会改动转发规则。新服务器在菜单里先选 **1 部署 Realm**，再选 **3 添加转发规则**。
+安装脚本先查询 `main` 分支的最新提交再按提交下载管理脚本，检查 Bash 语法后保存为 `/usr/local/bin/realmctl`，并打开菜单。推送后一分钟内就能装到新版本，不受 GitHub 下载地址 5 分钟缓存的影响。安装快捷命令本身不会安装 Realm，也不会改动转发规则。新服务器在菜单里先选 **1 部署 Realm**，再选 **3 添加转发规则**。
 
 以后直接输入：
 
@@ -24,18 +24,18 @@ apt update && apt install -y curl ca-certificates
 realmctl
 ```
 
-普通用户先下载再用 sudo 安装：
+普通用户先下载安装脚本，再用 sudo 执行，以后用 `sudo realmctl`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o /tmp/realmctl && sudo install -m 755 /tmp/realmctl /usr/local/bin/realmctl && sudo realmctl
+curl -fsSL https://raw.githubusercontent.com/macwk-com/realm-script/main/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh
 ```
 
-也可以先下载、检查再执行（第一次运行会自动装上 `realmctl` 命令）：
+也可以先下载、检查再执行：
 
 ```bash
-curl -fSL https://raw.githubusercontent.com/macwk-com/realm-script/main/realm.sh -o realm.sh
-less realm.sh
-bash realm.sh
+curl -fSL https://raw.githubusercontent.com/macwk-com/realm-script/main/install.sh -o install.sh
+less install.sh
+bash install.sh
 ```
 
 下面命令行示例中的 `bash realm.sh`，安装后也可以直接写成 `realmctl`。
@@ -88,7 +88,7 @@ bash realm.sh status
 
 - 菜单 **10 更新管理脚本**：下载 `main` 分支的最新提交，推送后一分钟内就能更新到；`realmctl` 等已安装的副本一起更新，更新完自动打开新版本。
 - 菜单 **8 更新 Realm**：从 Realm 官方发布下载最新版本，现有配置和规则保留。
-- 也可以重新执行上面的一键安装命令。它走 GitHub 下载地址，刚推送的更新可能要等 5 分钟。
+- 也可以重新执行上面的一键安装命令，同样按最新提交下载。
 
 ## 配置与安装保护
 
