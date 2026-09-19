@@ -299,7 +299,7 @@ wait_listening() {
         port=${item%/*}; proto=${item#*/}
         owner=$(port_owner "$port" "${proto:0:1}")
         if [[ -n $owner ]]; then printf '  %s  已被 %s 占用\n' "$item" "$owner" >&2
-        else printf '  %s  没有监听，请查看日志（菜单 10）\n' "$item" >&2; fi
+        else printf '  %s  没有监听，请到「服务管理」里查看日志\n' "$item" >&2; fi
     done
     return 1
 }
@@ -487,7 +487,7 @@ deploy_realm() (
     local mode=${1:-install} current
     current=$(realm_version)
     if [[ $mode == install && -n $current && -f $UNIT_PATH ]]; then
-        printf 'Realm 已经部署（版本 %s），要升级请选择菜单 9「更新 Realm」。\n' "$current"
+        printf 'Realm 已经部署（版本 %s），要升级请到「更新与卸载 → 更新 Realm」。\n' "$current"
         return 0
     fi
     init_env || return 1
@@ -534,18 +534,18 @@ EOF
         systemctl restart realm.service && wait_service || return 1
         printf 'Realm %s 已安装，现有配置保留，服务已重启，所有端口都在正常监听。\n' "$release_tag"
     elif [[ $(config_tool count) == 0 ]]; then
-        printf 'Realm %s 已安装。下一步：添加转发规则（菜单 2）。\n' "$release_tag"
+        printf 'Realm %s 已安装。下一步：在主菜单 2「转发规则管理」里添加转发规则。\n' "$release_tag"
     else
-        printf 'Realm %s 已安装，现有规则保留。服务还没启动，可以选择菜单 5 启动。\n' "$release_tag"
+        printf 'Realm %s 已安装，现有规则保留。服务还没启动，可以到「服务管理」里启动。\n' "$release_tag"
     fi
     commit_transaction
 )
 update_realm() { [[ -x $BASE_DIR/realm ]] || { error '请先部署 Realm。'; return 1; }; deploy_realm update; }
 # Realm exits immediately without endpoints, so refuse to start it empty.
 require_rules() {
-    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { error 'Realm 还没部署，请先选择菜单 8。'; return 1; }
+    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { error 'Realm 还没部署，请先在主菜单选 1 部署。'; return 1; }
     config_tool validate || return 1
-    [[ $(config_tool count) != 0 ]] || { error '还没有转发规则，请先添加（菜单 2）。'; return 1; }
+    [[ $(config_tool count) != 0 ]] || { error '还没有转发规则，请先在「转发规则管理」里添加。'; return 1; }
 }
 start_service() {
     require_rules || return 1
@@ -740,38 +740,38 @@ ensure_shortcut() {
     grep -Fq '# Realm Manager —' "$SELF_PATH" || return 1
     atomic_install "$SELF_PATH" "$SHORTCUT_PATH" 755
 }
-show_overview() {
-    set_colors
-    local state color note version active=0 pending=0 started rows count broken=0
-    local index listen remote port protos cell cell_color proto owner
-    rows=$(config_tool rows) || return 1
-    count=0; [[ -z $rows ]] || count=$(wc -l <<< "$rows")
+# The Realm service line: state, version, autostart and uptime, plus the protocols in use.
+service_rows() {
+    local state color note version started count
+    count=$(config_tool count 2>/dev/null) || count=0
     if [[ ! -x $BASE_DIR/realm || ! -f $UNIT_PATH ]]; then
-        state='● 未部署'; color=$c_err; note='选择 8 部署 Realm'
+        state='● 未部署'; color=$c_err; note='在主菜单选 1 部署 Realm'
     else
         version=$(realm_version)
         case $(systemctl is-active realm.service 2>/dev/null) in
             active)
-                active=1; state='● 运行中'; color=$c_ok
+                state='● 运行中'; color=$c_ok
                 started=$(systemctl show realm.service -p ActiveEnterTimestamp --value 2>/dev/null)
                 note="${version:-版本未知} · "
                 if systemctl is-enabled --quiet realm.service; then note+='开机自启'; else note+='未设开机自启'; fi
-                [[ -z $started ]] || note+=" · 已运行 $(human_uptime $(( $(date +%s) - $(date -d "$started" +%s) )))"
-                config_pending && pending=1 ;;
-            failed) state='● 启动失败'; color=$c_err; note='选择 10 查看日志' ;;
+                [[ -z $started ]] || note+=" · 已运行 $(human_uptime $(( $(date +%s) - $(date -d "$started" +%s) )))" ;;
+            failed) state='● 启动失败'; color=$c_err; note='在「服务管理」里查看日志' ;;
             *)
                 state='● 未运行'; color=$c_warn; note="${version:-版本未知}"
-                (( count == 0 )) || note+=' · 选择 5 启动' ;;
+                [[ $count == 0 ]] || note+=' · 在「服务管理」里启动' ;;
         esac
     fi
-    section '服务状态'
     printf '  %s%s%s%s  %s%s%s\n' "$(pad Realm 10)" "$color" "$(pad "$state" 12)" "$c_off" "$c_dim" "$note" "$c_off"
     printf '  %s%s\n' "$(pad 协议 10)" "$(config_tool protocols)"
-
-    section "转发规则（$count 条）"
-    if (( count == 0 )); then
-        printf '  %s无，选择 2 添加%s\n\n' "$c_dim" "$c_off"
-        return 0
+}
+# Every rule with the state of its listening port.
+rules_table() {
+    local rows active=0 pending=0 broken=0 index listen remote port protos cell cell_color proto owner
+    rows=$(config_tool rows) || return 1
+    if [[ -z $rows ]]; then printf '  %s还没有转发规则%s\n' "$c_dim" "$c_off"; return 0; fi
+    if systemctl is-active --quiet realm.service 2>/dev/null; then
+        active=1
+        config_pending && pending=1
     fi
     printf '  %s%s%s%s状态%s\n' "$c_dim" "$(pad 序号 6)" "$(pad 本机监听 24)" "$(pad 远程目标 28)" "$c_off"
     while IFS=$'\t' read -r index listen remote port protos; do
@@ -791,8 +791,17 @@ show_overview() {
         printf '  %s%s  %s  %s%s%s\n' "$(pad "$index" 6)" "$(pad "$listen" 22)" "$(pad "$remote" 26)" "$cell_color" "$cell" "$c_off"
     done <<< "$rows"
     (( ! pending && ! broken )) || printf '\n'
-    (( ! pending )) || printf '  %s配置有改动还没生效，选择 7 重启。%s\n' "$c_warn" "$c_off"
-    (( ! broken )) || printf '  %s有端口没监听成功：被占用的请换端口，其他情况选择 10 查看日志。%s\n' "$c_err" "$c_off"
+    (( ! pending )) || printf '  %s配置有改动还没生效，到「服务管理」里重启。%s\n' "$c_warn" "$c_off"
+    (( ! broken )) || printf '  %s有端口没监听成功：被占用的请换端口，其他情况到「服务管理」里查看日志。%s\n' "$c_err" "$c_off"
+}
+show_overview() {
+    set_colors
+    local count
+    count=$(config_tool count) || return 1
+    section '服务状态'
+    service_rows
+    section "转发规则（$count 条）"
+    rules_table
     printf '\n'
 }
 run_action() (
@@ -803,7 +812,7 @@ run_action() (
 # Ask whether to apply now; sets apply to yes or no depending on the running state.
 ask_apply() {
     apply=no
-    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { printf 'Realm 还没部署，规则先保存，部署后启动即可生效（菜单 8）。\n'; return 0; }
+    [[ -x $BASE_DIR/realm && -f $UNIT_PATH ]] || { printf 'Realm 还没部署，规则先保存，部署后启动即可生效（主菜单 1）。\n'; return 0; }
     if systemctl is-active --quiet realm.service; then
         if confirm '立即重启 Realm 让改动生效？正在转发的连接会断开一下' y; then apply=yes; fi
     elif [[ $1 == add ]]; then
@@ -856,8 +865,6 @@ menu_modify() {
     count=$(config_tool count) || return 0
     (( count > 0 )) || { printf '\n还没有转发规则。\n'; return 0; }
     printf '\n'
-    config_tool list
-    printf '\n'
     while true; do
         ask value '要修改哪一条？输入序号（回车返回）: ' && [[ -n $value ]] || return 0
         [[ $value =~ ^[0-9]+$ ]] && (( 10#$value >= 1 && 10#$value <= count )) && break
@@ -902,8 +909,6 @@ menu_delete() {
     count=$(config_tool count) || return 0
     (( count > 0 )) || { printf '\n还没有转发规则。\n'; return 0; }
     printf '\n'
-    config_tool list
-    printf '\n'
     while true; do
         ask value '要删除哪几条？输入序号，如 2、1-3 或 1,3（回车返回）: ' && [[ -n $value ]] || return 0
         chosen=$(config_tool show "$value" 2>&1) && break
@@ -927,18 +932,26 @@ menu_rule() {
     printf -v line '%*s' "$menu_span" ''
     printf '  %s%s%s\n' "$blue" "${line// /─}" "$reset"
 }
-menu_draw() {
-    local columns=$1 version=$2 status=$3 count=$4 protocols=$5 title=$6 detail=$7 note=${8:-}
-    local cyan='' blue='' reset='' bold='' dim=''
+menu_colors() {
+    cyan='' blue='' reset='' bold='' dim=''
     if [[ -t 1 && ${TERM:-dumb} != dumb && -z ${NO_COLOR:-} ]]; then
-        cyan=$'\033[36m'; blue=$'\033[34m'; reset=$'\033[0m'
-        bold=$'\033[1m'; dim=$'\033[90m'
+        cyan=$'\033[36m'; blue=$'\033[34m'; reset=$'\033[0m'; bold=$'\033[1m'; dim=$'\033[90m'
     fi
-    local menu_span=60 wide=1 i padding
+}
+clear_screen() { [[ ! -t 1 || ${TERM:-dumb} == dumb ]] || printf '\033[2J\033[H'; }
+# Terminal width decides between two columns and one (wide), and the length of the rules (menu_span).
+menu_layout() {
+    columns=$(tput cols 2>/dev/null) || columns=${COLUMNS:-80}
+    [[ $columns =~ ^[0-9]+$ ]] || columns=80
+    menu_span=60 wide=1
     if (( columns < 64 )); then
         wide=0; menu_span=$((columns - 4))
         (( menu_span >= 24 )) || menu_span=24
     fi
+}
+MENU_LABELS=('部署 Realm' '转发规则管理' '服务管理' '更新与卸载')
+menu_draw() {
+    local version=$1 status=$2 count=$3 protocols=$4 title=$5 detail=$6 note=${7:-} i padding
     printf '\n'
     if (( columns >= 44 )); then
         printf '%s' "$cyan"
@@ -962,26 +975,15 @@ LOGO
     fi
     menu_rule
     printf '\n'
-    local labels=('查看转发规则' '添加转发规则' '修改转发规则' '删除转发规则' '启动并开启自启' '停止并关闭自启' '重启服务'
-                  '部署 Realm' '更新 Realm' '查看服务日志' '更新管理脚本' '卸载 Realm')
     if (( wide )); then
-        menu_pair '日常操作' '安装与维护'
-        printf '\n'
-        for ((i=0;i<7;i++)); do
-            menu_item "$((i+1))" "${labels[i]}"
-            if (( i < 5 )); then
-                text_width "${labels[i]}"; padding=$((28 - 4 - REPLY))
-                # The first column already supplied the row indentation.
-                printf '%*s    %s%2s.%s %s' "$padding" '' "$cyan" "$((i+8))" "$reset" "${labels[i+7]}"
-            fi
-            printf '\n\n'
+        for ((i=0;i<2;i++)); do
+            menu_item "$((i+1))" "${MENU_LABELS[i]}"
+            text_width "${MENU_LABELS[i]}"; padding=$((28 - 4 - REPLY))
+            # The first column already supplied the row indentation.
+            printf '%*s    %s%2s.%s %s\n\n' "$padding" '' "$cyan" "$((i+3))" "$reset" "${MENU_LABELS[i+2]}"
         done
     else
-        printf '  %s日常操作%s\n\n' "$dim" "$reset"
-        for ((i=0;i<12;i++)); do
-            (( i != 7 )) || printf '\n  %s安装与维护%s\n\n' "$dim" "$reset"
-            menu_item "$((i+1))" "${labels[i]}"; printf '\n\n'
-        done
+        for ((i=0;i<4;i++)); do menu_item "$((i+1))" "${MENU_LABELS[i]}"; printf '\n\n'; done
     fi
     menu_rule
     menu_item 0 '退出'; printf '\n'; menu_rule
@@ -989,10 +991,104 @@ LOGO
     [[ -z $title ]] || printf '\n  %s%s%s\n  %s\n' "$cyan" "$title" "$reset" "$detail"
     printf '\n'
 }
-menu() {
-    local choice answer rc columns
+# Top of a second-level screen; the caller prints its status below.
+sub_title() {
+    clear_screen; menu_layout
+    printf '\n  %s%s%s\n' "$bold" "$1" "$reset"
+    menu_rule
+    printf '\n'
+}
+# The numbered actions of a second-level screen, then 0 to go back.
+sub_actions() {
+    local i=0 label
+    printf '\n'; menu_rule; printf '\n'
+    for label in "$@"; do i=$((i + 1)); menu_item "$i" "$label"; printf '\n\n'; done
+    menu_rule
+    menu_item 0 '返回主菜单'; printf '\n'; menu_rule
+    printf '\n'
+}
+# Read a choice from 1 to $1 into choice; returns 1 for 0 or end of input.
+menu_choose() {
     while true; do
-        [[ ${TERM:-dumb} == dumb ]] || printf '\033[2J\033[H'
+        ask choice "  请选择 [0-$1]: " || return 1
+        case "$choice" in
+            0|q|Q) return 1 ;;
+            '') ;;
+            *)
+                if [[ $choice =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= $1 )); then
+                    choice=$((10#$choice)); return 0
+                fi
+                printf '  没有这个选项，请输入 0 到 %s。\n' "$1" ;;
+        esac
+    done
+}
+pause() { local reply; ask reply $'\n按回车返回……' || true; }
+menu_rules() {
+    local choice
+    while true; do
+        sub_title '转发规则管理'
+        rules_table || true
+        sub_actions '添加转发规则' '修改转发规则' '删除转发规则'
+        menu_choose 3 || return 0
+        case $choice in
+            1) menu_add ;;
+            2) menu_modify ;;
+            3) menu_delete ;;
+        esac
+        pause
+    done
+}
+menu_service() {
+    local choice
+    while true; do
+        sub_title '服务管理'
+        service_rows
+        sub_actions '启动并开启自启' '停止并关闭自启' '重启服务' '查看服务日志'
+        menu_choose 4 || return 0
+        printf '\n'
+        case $choice in
+            1) run_action start_service || error '启动没有完成。' ;;
+            2) run_action stop_service || error '停止操作失败。' ;;
+            3) run_action restart_service || error '重启没有完成。' ;;
+            4) journalctl -u realm.service -n 50 --no-pager || true ;;
+        esac
+        pause
+    done
+}
+# Returns 3 after a complete uninstall so the main menu exits too.
+menu_maintain() {
+    local choice rc answer version
+    while true; do
+        sub_title '更新与卸载'
+        version=$(realm_version)
+        printf '  %s%s\n' "$(pad Realm 10)" "${version:-未安装}"
+        printf '  %s%s\n' "$(pad 管理脚本 10)" "$SELF_PATH"
+        sub_actions '更新 Realm' '更新管理脚本' '卸载 Realm'
+        menu_choose 3 || return 0
+        printf '\n'
+        rc=0
+        case $choice in
+            1) run_action update_realm || rc=$?; (( rc == 0 || rc == 2 )) || error '更新未完成。' ;;
+            2)
+                run_action Update_Shell || rc=$?
+                if (( rc == 0 )); then
+                    ask answer '按回车打开新版本……' || return 3
+                    exec bash "$SELF_PATH"
+                fi
+                (( rc == 2 )) || error '管理脚本更新失败。' ;;
+            3)
+                run_action uninstall_realm || rc=$?
+                (( rc != 0 )) || return 3
+                (( rc == 2 )) || error '卸载未完成，请查看上面的提示。' ;;
+        esac
+        pause
+    done
+}
+menu() {
+    local choice rc columns menu_span wide cyan blue reset bold dim
+    set_colors; menu_colors
+    while true; do
+        clear_screen; menu_layout
         local version='未安装' status='未部署' count protocols='—' title='' detail=''
         if [[ -x $BASE_DIR/realm ]]; then
             version=$(realm_version)
@@ -1008,56 +1104,23 @@ menu() {
         fi
         count=$(config_tool count 2>/dev/null) || count='配置错误'
         protocols=$(config_tool protocols 2>/dev/null) || protocols='—'
-        if [[ $status == 未部署 ]]; then title='尚未部署'; detail='新服务器请先选择 8。'
-        elif [[ $count == 配置错误 ]]; then title='配置文件有错误'; detail='选择 1 查看详情。'
-        elif [[ $count == 0 ]]; then title='还没有转发规则'; detail='选择 2 添加第一条。'
-        elif [[ $status == 启动失败 ]]; then title='服务启动失败'; detail='选择 10 查看日志。'
-        elif [[ $status != 运行中 ]]; then title='服务没在运行'; detail='规则已保存，选择 5 启动。'
-        elif config_pending; then title='配置有改动还没生效'; detail='选择 7 重启。'
+        if [[ $status == 未部署 ]]; then title='尚未部署'; detail='新服务器请先选择 1。'
+        elif [[ $count == 配置错误 ]]; then title='配置文件有错误'; detail='进入 2「转发规则管理」查看详情。'
+        elif [[ $count == 0 ]]; then title='还没有转发规则'; detail='进入 2「转发规则管理」添加第一条。'
+        elif [[ $status == 启动失败 ]]; then title='服务启动失败'; detail='进入 3「服务管理」查看日志。'
+        elif [[ $status != 运行中 ]]; then title='服务没在运行'; detail='规则已保存，进入 3「服务管理」启动。'
+        elif config_pending; then title='配置有改动还没生效'; detail='进入 3「服务管理」重启。'
         fi
         [[ $count == 配置错误 ]] || count="$count 条"
-        columns=$(tput cols 2>/dev/null) || columns=${COLUMNS:-80}
-        [[ $columns =~ ^[0-9]+$ ]] || columns=80
-        menu_draw "$columns" "$version" "$status" "$count" "$protocols" "$title" "$detail" "${shortcut_installed:-}"
+        menu_draw "$version" "$status" "$count" "$protocols" "$title" "$detail" "${shortcut_installed:-}"
         shortcut_installed=''
-        while true; do
-            ask choice '  请选择 [0-12]: ' || return 0
-            case "$choice" in
-                0|q|Q) return 0 ;;
-                [1-9]|1[0-2]) break ;;
-                '') ;;
-                *) printf '  没有这个选项，请输入 0 到 12。\n' ;;
-            esac
-        done
-        case "$choice" in
-            1) show_overview || true ;;
-            2) menu_add ;;
-            3) menu_modify ;;
-            4) menu_delete ;;
-            5) run_action start_service || error '启动没有完成。' ;;
-            6) run_action stop_service || error '停止操作失败。' ;;
-            7) run_action restart_service || error '重启没有完成。' ;;
-            8) run_action deploy_realm || error '部署未完成。' ;;
-            9)
-                rc=0
-                run_action update_realm || rc=$?
-                (( rc == 0 || rc == 2 )) || error '更新未完成。' ;;
-            10) journalctl -u realm.service -n 50 --no-pager || true ;;
-            11)
-                rc=0
-                run_action Update_Shell || rc=$?
-                if (( rc == 0 )); then
-                    ask answer '按回车打开新版本……' || return 0
-                    exec bash "$SELF_PATH"
-                fi
-                if (( rc != 2 )); then error '管理脚本更新失败。'; fi ;;
-            12)
-                rc=0
-                run_action uninstall_realm || rc=$?
-                if (( rc == 0 )); then return 0; fi
-                if (( rc != 2 )); then error '卸载未完成，请查看上面的提示。'; fi ;;
+        menu_choose 4 || return 0
+        case $choice in
+            1) printf '\n'; run_action deploy_realm || error '部署未完成。'; pause ;;
+            2) menu_rules ;;
+            3) menu_service ;;
+            4) rc=0; menu_maintain || rc=$?; (( rc != 3 )) || return 0 ;;
         esac
-        ask answer $'\n按回车返回菜单……' || return 0
     done
 }
 main() {
