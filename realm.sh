@@ -9,6 +9,11 @@ SCRIPT_REPO=macwk-com/realm-script
 PYTHON=${PYTHON:-python3}
 SELF_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SHORTCUT_PATH=/usr/local/bin/realmctl
+# sudo on RHEL-family systems only searches /usr/sbin and /usr/bin, so realmctl is linked there too.
+SUDO_LINK=/usr/bin/realmctl
+# tomlkit from PyPI when the system package is missing or older than 0.8 (Debian 10-11, Ubuntu 18-20, Rocky 8).
+TOMLKIT_DIR=$BASE_DIR/python
+export PYTHONPATH="$TOMLKIT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 error() { printf '\n错误：%s\n' "$*" >&2; return 1; }
 # Prompt with line editing (arrow keys work) and trim surrounding spaces. Returns 1 on EOF.
@@ -46,28 +51,52 @@ check_platform() {
     [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null || { error '需要正在运行的 systemd。'; return 1; }
 }
 # Install only what is missing; Rocky/Alma already ship curl-minimal, which conflicts with curl.
+# tomlkit before 0.8 silently drops deletions from arrays of tables, so older copies do not count.
+tomlkit_ok() {
+    "$PYTHON" -c 'import sys, tomlkit
+sys.exit(tuple(int(x) for x in tomlkit.__version__.split(".")[:2]) < (0, 8))' >/dev/null 2>&1
+}
+install_packages() {
+    if command -v apt-get >/dev/null; then
+        apt-get update && apt-get install -y "$@" && return 0
+        # Debian 10 and 11 are out of support; their packages moved to archive.debian.org.
+        local id version
+        id=$(. /etc/os-release; echo "${ID:-}") version=$(. /etc/os-release; echo "${VERSION_ID:-}")
+        if [[ $id == debian && ( $version == 10 || $version == 11 ) ]]; then
+            error "Debian $version 已停止维护，软件源搬到了 archive.debian.org，请先改好 /etc/apt/sources.list 再试。"
+        else
+            error '软件安装失败，请检查网络和软件源。'
+        fi
+        return 1
+    elif command -v dnf >/dev/null; then
+        # Rocky/Alma ship python3-tomlkit in EPEL.
+        dnf install -y epel-release >/dev/null 2>&1 || true
+        dnf install -y "$@"
+    elif command -v yum >/dev/null; then
+        yum install -y "$@"
+    else
+        error "请手动安装：$*"
+    fi
+}
 check_dependencies() {
     local packages=() cmd
     command -v curl >/dev/null || packages+=(curl ca-certificates)
     command -v python3 >/dev/null || packages+=(python3)
-    "$PYTHON" -c 'import tomlkit' >/dev/null 2>&1 || packages+=(python3-tomlkit)
     command -v flock >/dev/null || packages+=(util-linux)
     if (( ${#packages[@]} )); then
         printf '安装依赖：%s\n' "${packages[*]}"
-        if command -v apt-get >/dev/null; then
-            apt-get update && apt-get install -y "${packages[@]}" || return 1
-        elif command -v dnf >/dev/null; then
-            # Rocky/Alma ship python3-tomlkit in EPEL.
-            dnf install -y epel-release >/dev/null 2>&1 || true
-            dnf install -y "${packages[@]}" || return 1
-        elif command -v yum >/dev/null; then
-            yum install -y "${packages[@]}" || return 1
-        else
-            error "请手动安装：${packages[*]}"; return 1
-        fi
+        install_packages "${packages[@]}" || return 1
     fi
     for cmd in curl flock; do command -v "$cmd" >/dev/null || return 1; done
-    "$PYTHON" -c 'import tomlkit' || return 1
+    tomlkit_ok && return 0
+    # Not every release packages tomlkit, so a failure here just moves on to PyPI.
+    printf '安装依赖：python3-tomlkit\n'
+    install_packages python3-tomlkit >/dev/null 2>&1 || true
+    tomlkit_ok && return 0
+    printf '系统软件源里没有可用的 tomlkit（需要 0.8 以上），改从 PyPI 装到 %s。\n' "$TOMLKIT_DIR"
+    "$PYTHON" -m pip --version >/dev/null 2>&1 || install_packages python3-pip || return 1
+    mkdir -p "$TOMLKIT_DIR" && "$PYTHON" -m pip install -q --target "$TOMLKIT_DIR" 'tomlkit>=0.8' || return 1
+    tomlkit_ok || { error 'tomlkit 安装失败。'; return 1; }
 }
 init_env() {
     mkdir -p "$BASE_DIR" "$(dirname "$CONFIG_PATH")" "$BACKUP_ROOT" || return 1
@@ -371,6 +400,12 @@ mutate_config() (
 firewall_hint() {
     local port=$1 status cmd="ufw allow $1"
     printf '别忘了在服务商安全组（云防火墙）放行端口 %s（TCP 和 UDP）。\n' "$port"
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd -q --query-port="$port/tcp" 2>/dev/null && return 0
+        printf '本机防火墙 firewalld 已启用，但端口 %s 还没放行，外部连不进来。可以执行：\n' "$port"
+        printf '    firewall-cmd --permanent --add-port=%s/tcp --add-port=%s/udp && firewall-cmd --reload\n' "$port" "$port"
+        return 0
+    fi
     command -v ufw >/dev/null && status=$(ufw status 2>/dev/null) || return 0
     [[ $status == 'Status: active'* ]] || return 0
     grep -Eq "^$port(/(tcp|udp))?[[:space:]]" <<< "$status" && return 0
@@ -378,14 +413,21 @@ firewall_hint() {
     printf '本机防火墙 UFW 已启用，但端口 %s 还没放行，外部连不进来。可以执行：\n    %s\n' "$port" "$cmd"
 }
 fetch() { curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 15 --max-time 180 --retry 2 "$1" -o "$2"; }
+version_ge() { [[ -n $1 ]] && printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
+# Realm's default builds need glibc 2.38; older systems take the glibc 2.28 build, older still the static musl one.
 asset_name() {
+    local arch gnu musl libc
     case $(uname -m) in
-        x86_64|amd64) printf 'realm-x86_64-unknown-linux-gnu.tar.gz\n' ;;
-        aarch64|arm64) printf 'realm-aarch64-unknown-linux-gnu.tar.gz\n' ;;
-        armv7l|armv7) printf 'realm-armv7-unknown-linux-gnueabihf.tar.gz\n' ;;
-        armv6l|arm) printf 'realm-arm-unknown-linux-gnueabihf.tar.gz\n' ;;
+        x86_64|amd64) arch=x86_64 gnu=unknown-linux-gnu musl=unknown-linux-musl ;;
+        aarch64|arm64) arch=aarch64 gnu=unknown-linux-gnu musl=unknown-linux-musl ;;
+        armv7l|armv7) arch=armv7 gnu=unknown-linux-gnueabihf musl=unknown-linux-musleabihf ;;
+        armv6l|arm) arch=arm gnu=unknown-linux-gnueabihf musl=unknown-linux-musleabihf ;;
         *) error '不支持当前 CPU 架构，请手动安装 Realm。'; return 1 ;;
     esac
+    libc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+    if version_ge "$libc" 2.38; then printf 'realm-%s-%s.tar.gz\n' "$arch" "$gnu"
+    elif version_ge "$libc" 2.28; then printf 'realm-%s-%s-glibc2.28.tar.gz\n' "$arch" "$gnu"
+    else printf 'realm-%s-%s.tar.gz\n' "$arch" "$musl"; fi
 }
 # Installed Realm version such as 2.9.6, or nothing.
 realm_version() {
@@ -547,6 +589,7 @@ uninstall_realm() (
     (( ${#scripts[@]} == 0 )) || removed+=('管理脚本')
     backups=$(find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'snapshot-*' 2>/dev/null | wc -l)
     (( backups == 0 )) || removed+=("$backups 份操作备份")
+    [[ ! -d $TOMLKIT_DIR ]] || removed+=('Python 依赖')
     if (( ${#removed[@]} == 0 && ! active )); then
         printf '\n这台服务器上没有安装 Realm，也没有需要删除的管理脚本或备份。\n'
         return 2
@@ -556,6 +599,8 @@ uninstall_realm() (
     printf '完整卸载会删除：\n'
     for candidate in ${targets[@]+"${targets[@]}"}; do printf '  %s\n' "$candidate"; done
     (( backups == 0 )) || printf '  %s 里的 %s 份操作备份\n' "$BACKUP_ROOT" "$backups"
+    [[ ! -d $TOMLKIT_DIR ]] || printf '  %s（从 PyPI 装的 tomlkit）\n' "$TOMLKIT_DIR"
+    [[ ! -L $SUDO_LINK || $(readlink -f "$SUDO_LINK") != "$SHORTCUT_PATH" ]] || printf '  %s（给 sudo 用的链接）\n' "$SUDO_LINK"
     (( ! active )) || printf 'Realm 正在运行，会先停止，所有转发立即中断。\n'
     (( ${#scripts[@]} == 0 )) || printf '删除管理脚本后，要重新执行一键安装命令才能再用。\n'
     printf '不会动系统日志、依赖包、防火墙规则和其他程序的文件；只移除空目录。\n'
@@ -578,6 +623,9 @@ uninstall_realm() (
     # Recovery remains possible until service removal and script deletion succeed.
     # Complete uninstall explicitly discards the transaction snapshot afterwards.
     tx_committed=1
+    # Both are ours alone: the private tomlkit copy and the sudo link to a realmctl that is now gone.
+    rm -rf -- "$TOMLKIT_DIR" || cleanup_failed=1
+    if [[ -L $SUDO_LINK && $(readlink "$SUDO_LINK") == "$SHORTCUT_PATH" ]]; then rm -f -- "$SUDO_LINK" || cleanup_failed=1; fi
     "$PYTHON" - "$BASE_DIR" "$CONFIG_PATH" "$BACKUP_ROOT" <<'PY'
 import pathlib,re,shutil,sys
 base,config,backups=map(pathlib.Path,sys.argv[1:])
@@ -678,6 +726,15 @@ human_uptime() {
 }
 # Service summary plus every rule with the state of its listening port.
 # The first run from a downloaded file installs the realmctl command; an existing one is left alone.
+link_for_sudo() {
+    local path
+    [[ -f $SHORTCUT_PATH ]] || return 0
+    path=$(sudo -V 2>/dev/null | sed -n 's/^Value to override user.s \$PATH with: //p') || path=''
+    [[ -n $path && :$path: != *:${SHORTCUT_PATH%/*}:* ]] || return 0
+    if [[ ! -e $SUDO_LINK || ( -L $SUDO_LINK && $(readlink -f "$SUDO_LINK") == "$SHORTCUT_PATH" ) ]]; then
+        ln -sfn "$SHORTCUT_PATH" "$SUDO_LINK"
+    fi
+}
 ensure_shortcut() {
     [[ $SELF_PATH != "$SHORTCUT_PATH" && -f $SELF_PATH && ! -e $SHORTCUT_PATH && ! -L $SHORTCUT_PATH ]] || return 1
     grep -Fq '# Realm Manager —' "$SELF_PATH" || return 1
@@ -1006,6 +1063,7 @@ menu() {
 main() {
     if [[ ${1:-} == -h || ${1:-} == --help ]]; then usage;return 0;fi
     check_platform && check_dependencies || return 1
+    link_for_sudo
     if ensure_shortcut; then
         shortcut_installed=1
         [[ ${1:-menu} == menu ]] || printf '已安装快捷命令 realmctl，以后直接输入 realmctl 即可。\n'

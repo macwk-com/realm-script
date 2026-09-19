@@ -1,6 +1,13 @@
 # Realm 中转管理
 
-用 [Realm](https://github.com/zhboner/realm) 做 TCP/UDP 端口转发的终端菜单：部署和更新 Realm、增删转发规则、管理 systemd 服务。主要面向 Debian 13，Ubuntu、Rocky/Alma 也能用。Realm 程序装在 `/opt/realm/realm`，转发配置在 `/etc/realm/config.toml`。
+用 [Realm](https://github.com/zhboner/realm) 做 TCP/UDP 端口转发的终端菜单：部署和更新 Realm、增删转发规则、管理 systemd 服务。Realm 程序装在 `/opt/realm/realm`，转发配置在 `/etc/realm/config.toml`。支持的系统：
+
+| 系统 | 版本 |
+|---|---|
+| Debian | 10 11 12 13 14 |
+| Ubuntu | 18.04 20.04 22.04 24.04 26.04 |
+| Rocky Linux | 8 9 10 |
+| AlmaLinux | 8 9 10 |
 
 ## 一键安装
 
@@ -39,6 +46,13 @@ bash install.sh
 ```
 
 下面命令行示例中的 `bash realm.sh`，安装后也可以直接写成 `realmctl`。
+
+## 各系统的差异
+
+- **Realm 安装包**：官方默认的 Linux 版要求 glibc 2.38（Debian 13、Ubuntu 24.04、Rocky 10 起）。更老的系统自动改用官方的 glibc 2.28 版；Ubuntu 18.04 的 glibc 只有 2.27，用官方的 musl 静态版。
+- **tomlkit**：脚本用它读写转发配置，需要 0.8 以上。Debian 10–11、Ubuntu 18.04–20.04、Rocky 8 的软件源里没有或版本太旧，会自动从 PyPI 装到 `/opt/realm/python`，不影响系统自带的 Python，卸载时一起删除。
+- **Rocky / AlmaLinux**：依赖从 EPEL 源安装；sudo 不搜索 `/usr/local/bin`，会在 `/usr/bin/realmctl` 放一个链接，普通用户照样用 `sudo realmctl`。firewalld 启用时，添加规则后会提示对应的 `firewall-cmd` 放行命令。
+- **Debian 10、11**：已停止维护，软件源搬到了 `archive.debian.org`，使用前需要先改好 `/etc/apt/sources.list`。
 
 ## 使用
 

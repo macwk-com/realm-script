@@ -46,6 +46,17 @@ chmod 755 "$download"
 mv -f "$download" "$destination"
 trap - EXIT INT TERM
 
+# sudo on RHEL-family systems only searches /usr/sbin and /usr/bin, so `sudo realmctl` needs a link there.
+sudo_path=$(sudo -V 2>/dev/null | sed -n 's/^Value to override user.s \$PATH with: //p' || true)
+if [[ -n $sudo_path && :$sudo_path: != *:$install_dir:* ]]; then
+    link=/usr/bin/realmctl
+    if [[ ! -e $link || ( -L $link && $(readlink -f "$link") == "$destination" ) ]]; then
+        ln -sfn "$destination" "$link"
+    else
+        printf '注意：%s 已被其他程序占用，普通用户请用 sudo %s 运行。\n' "$link" "$destination"
+    fi
+fi
+
 printf '\n安装完成。以后输入 realmctl 即可打开菜单。\n'
 if [[ -t 0 && -t 1 ]]; then
     exec "$destination"
