@@ -1,6 +1,6 @@
 # Realm 中转管理
 
-用 [Realm](https://github.com/zhboner/realm) 做 TCP/UDP 端口转发的终端菜单：部署和更新 Realm、增删转发规则、管理 systemd 服务。主要面向 Debian 13，Ubuntu、Rocky/Alma 也能用。沿用原项目的程序位置 `/root/realm/realm` 和配置位置 `/root/.realm/config.toml`，已有安装可以直接接管。
+用 [Realm](https://github.com/zhboner/realm) 做 TCP/UDP 端口转发的终端菜单：部署和更新 Realm、增删转发规则、管理 systemd 服务。主要面向 Debian 13，Ubuntu、Rocky/Alma 也能用。Realm 程序装在 `/opt/realm/realm`，转发配置在 `/etc/realm/config.toml`。
 
 ## 一键安装
 
@@ -56,9 +56,6 @@ bash install.sh
 # 查看规则
 bash realm.sh list
 
-# 保留原来的 -l / -r 用法：保存配置，不自动重启
-bash realm.sh -l 0.0.0.0:23456 -r example.com:443
-
 # 添加规则，并立即应用；应用失败会恢复配置
 bash realm.sh add 0.0.0.0:23457 example.com:443 --apply
 
@@ -102,12 +99,12 @@ bash realm.sh status
 - 下载到临时目录，仅提取安装包中的普通 `realm` 文件，验证新程序能运行且版本匹配后原子替换。
 - 更新前正在运行的服务会重启并检查状态；失败时恢复旧文件并尝试恢复服务。原来未运行的服务不会因更新而自动启动。
 - 自更新使用当前脚本的绝对路径，下载和语法检查成功后再替换，不受工作目录切换影响。
-- 菜单 12 为完整卸载，确认后停止并禁用服务，删除 Realm 程序、服务文件、当前配置、脚本生成的全部备份及安装包，并删除当前管理脚本和已识别的 `/usr/local/bin/realmctl`、`/root/realm.sh`、`/root/realm/realm.sh`。成功后退出菜单；转发规则不会保留。
+- 菜单 12 为完整卸载，确认后停止并禁用服务，删除 Realm 程序、服务文件、当前配置、脚本生成的全部备份，以及管理脚本本身和 `/usr/local/bin/realmctl`。成功后退出菜单；转发规则不会保留。
 - 只移除空目录，保留目录内其他文件；不删除系统共享日志、依赖包或 UFW 放行规则。服务停止或文件删除失败时会尝试恢复，卸载成功后不保留恢复备份。
 
 ## 备份策略
 
-备份在 `/root/.realm/backups/`，仅 root 可访问。完整卸载会删除这些备份。
+备份在 `/var/backups/realm/`，仅 root 可访问。完整卸载会删除这些备份。
 
 **每次操作成功后，只保留最近一次操作前的备份。** 失败操作不会清理先前备份；下一次操作成功时再统一清理。这里只处理本脚本生成、带完整清单的备份，不修改 Git 历史。
 

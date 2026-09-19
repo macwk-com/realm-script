@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Realm Manager — https://github.com/macwk-com/realm-script
-# Files are kept compatible with the original /root/realm installation.
-BASE_DIR=/root/realm
-CONFIG_PATH=/root/.realm/config.toml
+BASE_DIR=/opt/realm
+CONFIG_PATH=/etc/realm/config.toml
 UNIT_PATH=/etc/systemd/system/realm.service
-BACKUP_ROOT=/root/.realm/backups
+BACKUP_ROOT=/var/backups/realm
 LOCK_PATH=/run/lock/realm-manager.lock
 SCRIPT_REPO=macwk-com/realm-script
 PYTHON=${PYTHON:-python3}
 SELF_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SHORTCUT_PATH=/usr/local/bin/realmctl
-LEGACY_SCRIPT=/root/realm.sh
 
 error() { printf '\n错误：%s\n' "$*" >&2; return 1; }
 # Prompt with line editing (arrow keys work) and trim surrounding spaces. Returns 1 on EOF.
@@ -34,7 +32,6 @@ usage() {
 用法：
   bash realm.sh                     彩色菜单
   bash realm.sh list                查看规则
-  bash realm.sh -l IP:端口 -r 目标:端口   添加规则（仅保存）
   bash realm.sh add IP:端口 目标:端口 [--apply]
   bash realm.sh modify 序号 IP:端口 目标:端口 [--apply]
   bash realm.sh delete 序号或范围 [--apply]
@@ -530,17 +527,16 @@ restart_service() {
 }
 # Lists and removes only what actually exists; returns 2 when cancelled or there is nothing to remove.
 uninstall_realm() (
-    local candidate cleanup_failed=0 installed=0 active=0 backups packages
+    local candidate cleanup_failed=0 installed=0 active=0 backups
     local targets=() scripts=() removed=()
     [[ ! -e $BASE_DIR/realm ]] || { targets+=("$BASE_DIR/realm"); removed+=('Realm 程序'); }
     [[ ! -e $UNIT_PATH ]] || { targets+=("$UNIT_PATH"); removed+=('systemd 服务'); }
     [[ ! -e $CONFIG_PATH ]] || { targets+=("$CONFIG_PATH"); removed+=('转发配置'); }
     (( ${#targets[@]} == 0 )) || installed=1
     systemctl is-active --quiet realm.service && active=1
-    for candidate in "$SELF_PATH" "$SHORTCUT_PATH" "$LEGACY_SCRIPT" "$BASE_DIR/realm.sh"; do
+    for candidate in "$SELF_PATH" "$SHORTCUT_PATH"; do
         [[ -f $candidate && ! -L $candidate ]] || continue
-        if grep -Fq '# Realm Manager —' "$candidate" ||
-           { grep -Fq '欢迎使用Realm一键部署脚本' "$candidate" && grep -Fq 'deploy_realm()' "$candidate"; }; then
+        if grep -Fq '# Realm Manager —' "$candidate"; then
             # Deduplicate aliases such as SELF_PATH == SHORTCUT_PATH.
             local already=0 existing
             for existing in ${scripts[@]+"${scripts[@]}"}; do [[ $existing != "$candidate" ]] || already=1; done
@@ -550,9 +546,7 @@ uninstall_realm() (
     targets+=(${scripts[@]+"${scripts[@]}"})
     (( ${#scripts[@]} == 0 )) || removed+=('管理脚本')
     backups=$(find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'snapshot-*' 2>/dev/null | wc -l)
-    packages=$(find "$BASE_DIR" -maxdepth 1 -type f -name 'realm*.tar.gz' 2>/dev/null | wc -l)
     (( backups == 0 )) || removed+=("$backups 份操作备份")
-    (( packages == 0 )) || removed+=("$packages 个安装包")
     if (( ${#removed[@]} == 0 && ! active )); then
         printf '\n这台服务器上没有安装 Realm，也没有需要删除的管理脚本或备份。\n'
         return 2
@@ -562,7 +556,6 @@ uninstall_realm() (
     printf '完整卸载会删除：\n'
     for candidate in ${targets[@]+"${targets[@]}"}; do printf '  %s\n' "$candidate"; done
     (( backups == 0 )) || printf '  %s 里的 %s 份操作备份\n' "$BACKUP_ROOT" "$backups"
-    (( packages == 0 )) || printf '  %s 里的 %s 个 Realm 安装包\n' "$BASE_DIR" "$packages"
     (( ! active )) || printf 'Realm 正在运行，会先停止，所有转发立即中断。\n'
     (( ${#scripts[@]} == 0 )) || printf '删除管理脚本后，要重新执行一键安装命令才能再用。\n'
     printf '不会动系统日志、依赖包、防火墙规则和其他程序的文件；只移除空目录。\n'
@@ -593,10 +586,6 @@ if backups.exists():
     for p in backups.iterdir():
         if p.is_dir() and not p.is_symlink() and re.fullmatch(r'snapshot-[A-Za-z0-9]{8}',p.name) and (p/'manifest.json').is_file():
             shutil.rmtree(p)
-if base.exists():
-    for p in base.iterdir():
-        if p.is_file() and not p.is_symlink() and re.fullmatch(r'realm(?:-v?[0-9]+\.[0-9]+\.[0-9]+)?\.tar\.gz',p.name):
-            p.unlink()
 # Only prune empty directories. Never recursively delete a mixed-use directory.
 for p in (backups, config.parent, base):
     if p.is_dir() and not p.is_symlink():
@@ -635,10 +624,10 @@ Update_Shell() (
     snapshot "$SELF_PATH" || return 1
     chmod 755 "$tmp" && mv -f "$tmp" "$SELF_PATH" || return 1
     # Keep the realmctl copy on the same version as the script that was updated.
-    for copy in "$SHORTCUT_PATH" "$LEGACY_SCRIPT"; do
-        [[ $copy != "$SELF_PATH" && -f $copy && ! -L $copy ]] && grep -Fq '# Realm Manager —' "$copy" || continue
+    copy=$SHORTCUT_PATH
+    if [[ $copy != "$SELF_PATH" && -f $copy && ! -L $copy ]] && grep -Fq '# Realm Manager —' "$copy"; then
         atomic_install "$SELF_PATH" "$copy" 755 && printf '已同步更新 %s\n' "$copy"
-    done
+    fi
     prune_backups || true
     printf '管理脚本已更新。\n'
 )
@@ -977,7 +966,7 @@ menu() {
         while true; do
             ask choice '  请选择 [0-12]: ' || return 0
             case "$choice" in
-                0|88|q|Q) return 0 ;;
+                0|q|Q) return 0 ;;
                 [1-9]|1[0-2]) break ;;
                 '') ;;
                 *) printf '  没有这个选项，请输入 0 到 12。\n' ;;
@@ -1037,12 +1026,6 @@ main() {
             [[ $# == 2 || ( $# == 3 && $3 == --apply ) ]] || { usage;return 1; }
             local apply=no; [[ ${3:-} != --apply ]] || apply=yes
             run_action mutate_config delete "$2" "$apply" ;;
-        -l|-r)
-            local listen='' remote='' opt OPTIND=1
-            while getopts ':l:r:' opt;do case $opt in l) listen=$OPTARG;; r)remote=$OPTARG;; *)usage;return 1;; esac;done
-            shift $((OPTIND-1))
-            [[ -n $listen && -n $remote && $# == 0 ]] || { usage;return 1; }
-            run_action mutate_config add "$listen" no "$remote" ;;
         install) run_action deploy_realm ;;
         update) run_action update_realm ;;
         start) run_action start_service ;;
